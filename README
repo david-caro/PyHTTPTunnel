@@ -1,0 +1,9 @@
+This is a little script that can be used as a http/https tunnel and (not yet) 
+might be able to change the request and the response according to some rules 
+(yet to be defined).
+
+It creates a sample config file fil called directly, the config file might have
+more than one section, thescript will start a tunnel for each section withe
+the desired tunnel configuration.
+
+
