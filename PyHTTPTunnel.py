@@ -16,62 +16,126 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import thread, threading, 
-import sys
+import thread, threading 
+import sys, string
 import socket, ssl
 import argparse
 import ConfigParser, os
+import re
 
 __version__ = '0.1'
-BUFLEN = 1024
+## The best choice usually is a power of 2 2^12 should be ok
+BUFLEN = 4096
 CONFFILE = 'pytunnel.conf'
-CERTFILE = 'server.crt'
-KEYFILE = 'server.key'
+DEBUG = False
 
 class ConnectionHandler:
-    def __init__(self, connection, address, timeout, 
+    def __init__(self, connection, address, 
                     remote_host, remote_port, 
-                    local_proto='http', remote_proto='http'):
+                    local_proto='http', remote_proto='http',
+                    remote_cert='server.crt', remote_key='server.key',
+                    request_regexps=None, response_regexps=None,
+                    request_extra_headers=None, response_extra_headers=None):
+	self.local_proto=local_proto
         self.client = connection
-        self.timeout = timeout
         self.remote_host=remote_host
         self.remote_port=remote_port
         self.remote_proto=remote_proto
+        self.remote_cert=remote_cert
+        self.remote_key=remote_key
+        self.request_extra_headers=request_extra_headers or []
+        self.response_extra_headers=response_extra_headers or []
+        self.request_regexps=request_regexps or []
+        self.response_regexps=response_regexps or []
         self.target=None
 
         try:
-            self.request = self.get_request()
-            if not self.request:
-                if local_proto=='https':
-                    self.client.shutdown(socket.SHUT_RDWR)
-                self.client.close()
-                return False
             self.target = self.connect_to_target()
-            self.forward_request()
-            self.response=self.read_response()
-            self.reply_to_client()
+            if DEBUG: print 'connected'
+            sys.stdout.flush()
+            if not self.target: 
+                if DEBUG: print "Can't connect to %s:%s."%(remote_host,remote_port)
+                return
+            request = self.get_request()
+            if DEBUG: print 'got request'
+            sys.stdout.flush()
+            if not request: return 
+            self.target.sendall('%s'%request)
+            if DEBUG: print 'Sent request'
+            sys.stdout.flush()
+            response=self.get_response()
+            if DEBUG: print 'Got reponse'
+            sys.stdout.flush()
+            self.client.sendall('%s'%response)
+            if DEBUG: print 'Sent reponse'
+            sys.stdout.flush()
         finally:
             if self.target: self.target.close()
             if local_proto=='https':
                if self.client: self.client.shutdown(socket.SHUT_RDWR)
-            if self.client: self.client.close()
+            self.client.close()
 
     def get_request(self):
         method, data=self.get_request_method()
-        request=data
-        if method == 'GET':
-            request, data=self.get_headers(old_data=request)
-        elif method == 'POST':
-            request, data=self.get_headers(old_data=request)
-            content_length=self.get_content_length(request)
-            print "OLDDATA::::\n%s\n:::::"%data
-            data=self.get_POST_data(length=content_length,old_data=data)
-            request=request+data
-        else:
-            print "ERROR ::: Method %s not supported yet."%method
+        headers, data=self.get_headers(conn=self.client,old_data=data)
+        if method == 'POST':
+            content_length=self.get_content_length(headers)
+            data=self.get_data(conn=self.client,length=content_length,old_data=data)
+        elif not method == 'GET':
+            if DEBUG: print "::::::::: ERROR ::: Method %s not supported yet."%method
+            sys.stdout.flush()
             return False
-        print 'REQUEST FROM CLIENT ::::\n%s\n::::::::::'%request
-        return request
+        if DEBUG: print '::::::::: REQUEST FROM CLIENT %s:%s'%self.client.getpeername()+' ::::\n%s\n::::::::::'%(headers+'\r\n\r\n'+data)
+        sys.stdout.flush()
+        # parse the data and make the substitutions
+        if data: fixed_data=self.parse_data(data,self.request_regexps)
+        else: fixed_data=data
+        # fix the content lenght if necessary and add the aditional haeders
+        if headers: 
+            fixed_headers=self.fix_content_length(headers,len(fixed_data))
+        else:
+            fixed_headers=headers
+        fixed_headers=fixed_headers+'\r\n'+'\r\n'.join(self.request_extra_headers)
+        # assemble the request
+        fixed_request=fixed_headers+'\r\n\r\n'+fixed_data
+        if DEBUG: print '::::::::: REQUEST TO TARGET %s:%s'%self.target.getpeername()+' ::::\n%s\n::::::::::'%(fixed_request)
+        sys.stdout.flush()
+        return fixed_request
+
+    def get_response(self):
+        headers, data=self.get_headers(conn=self.target,old_data='')
+        if DEBUG: print "Got response headers"
+        content_length=self.get_content_length(headers)
+        if DEBUG: print "lllllllllllllllllllllllllllll %d"%(len(data)+4+len(headers))
+        if content_length:
+            data=self.get_data(conn=self.target,length=content_length,old_data=data)
+        elif len(data)+4+len(headers)==BUFLEN:
+            data=self.get_data(conn=self.target,old_data=data)
+        if DEBUG: print '::::::::: RESPONSE FROM TARGET  %s:%s'%self.target.getpeername()+'::::\n%s\n::::::::::'%(headers+'\r\n\r\n'+data)
+        sys.stdout.flush()
+        # parse the data and make the substitutions
+        if data: fixed_data=self.parse_data(data,self.response_regexps)
+        # fix the content lenght if necessary and add the aditional haeders
+        if headers:
+            fixed_headers=self.fix_content_length(headers,len(fixed_data))
+        else:
+            fixed_headers=headers
+        fixed_headers=fixed_headers+'\r\n'+'\r\n'.join(self.response_extra_headers)
+        # assemble the response
+        fixed_response=fixed_headers+'\r\n\r\n'+fixed_data
+        if DEBUG: print '::::::::: RESPONSE TO CLIENT %s:%s'%self.client.getpeername()+'::::\n%s\n::::::::::'%(fixed_response)
+        sys.stdout.flush()
+        return fixed_response
+
+    def fix_content_length(self,headers,new_length):
+        pattern=r'Content-Length: \d+'
+        return re.sub(pattern, 'Content-Length: %d'%new_length, headers)
+
+    def parse_data(self, data, regexps):
+        fixeddata=data
+        for regexp, substitute in regexps:
+            fixeddata = fixeddata.replace(regexp, substitute)
+        return fixeddata
               
     def get_request_method(self):
         method=''
@@ -81,80 +145,81 @@ class ConnectionHandler:
         return method, data
 
     def get_content_length(self, headers):
-        import re
         result=re.search('Content-Length: (?P<content_length>\d+)',headers)
         content_length=result.group('content_length')
-        print 'content_length ::::\n%s\n::::::::::'%content_length
-        return int(content_length)
+        return content_length and int(content_length)
 
-    def get_headers(self,old_data):
+    def get_headers(self,conn,old_data,extra_headers=''):
         headers=old_data
         newdata=''
         method=''
         end = headers.find('\r\n\r\n')
         if end != -1:
-            return headers[:end+4],headers[end+4:]
+            return headers[:end],headers[end+4:]
         while 1:
-            newdata = self.client.recv(BUFLEN)
-            for char in newdata:
-                print ord(char)
+            newdata = conn.recv(BUFLEN)
             headers += newdata
             end = headers.find('\r\n\r\n')
-            if end != -1:
-                break
-        print 'HEADERS ::::\n%s\n::::::::::'%headers[:end+2]
-        return headers[:end+2],headers[end+2:]
+            if end != -1: break
+        sys.stdout.flush()
+        return headers[:end],headers[end+4:]
 
-    def get_POST_data(self,length,old_data):
+    def get_data(self,conn,length=None,old_data=''):
         data=old_data
-        while len(data)<length:
-            newdata = self.client.recv(BUFLEN)
-            data=data+newdata
-        return data[:length]
-    
+        if length==None:
+            while 1:
+                newdata=conn.recv(BUFLEN)
+                data=data+newdata
+                if len(newdata)<BUFLEN: break
+        else:
+            while len(data)<length:
+                data+=conn.recv(length-len(data))
+        return data
 
     def connect_to_target(self):
         (soc_family, _, _, _, address) = socket.getaddrinfo(self.remote_host, self.remote_port)[0]
         target = socket.socket(soc_family)
         if self.remote_proto == 'https':
-            target = ssl.wrap_socket(target)
+            try:
+                target = ssl.wrap_socket(target)
+            except ssl.SSLError:
+                print "::::::::: ERROR :::: SSL protocol not supported by remote %s:%d."%(self.remote_host, self.remote_port)
+                sys.stdout.flush()
+                return None
         target.connect(address)
         return target
 
-    def forward_request(self):
-        print "REQUEST TO TARGET ::::::::::\n%s\n::::::::::::"%self.request
-        self.target.send('%s'%self.request)
-
-    def read_response(self):
-        response=''
-        while 1:
-            data=self.target.recv(BUFLEN)
-            if not data: break
-            response+=data
-        print "RESPONSE FROM TARGET ::::::\n%s\n:::::::::"%response
-        return response
-    
-    def reply_to_client(self):
-        print "RESPONSE TO CLIENT ::::::\n%s\n:::::::::"%self.response
-        self.client.send("%s"%self.response)
 
 
-class Tunnel(threading.Thread):
+class Tunnel:
     def __init__(self,
-            local_port=8080, local_ip='127.0.0.1', local_proto='http', 
-            remote_port=80, remote_host='127.0.0.1', remote_proto='http',
+            local_port=8888, local_ip='127.0.0.1', local_proto='http', 
+            remote_port=8080, remote_host='127.0.0.1', remote_proto='http',
+            local_cert='server.crt', local_key='server.key',
+            remote_cert='server.crt', remote_key='server.key',
             request_extra_headers='', response_extra_headers='',
+            request_regexps=None, response_regexps=None,
             IPv6=False,timeout=60):
         print "Starting thread server at %s://%s:%s --> %s://%s:%s"%(local_proto, local_ip, local_port, remote_proto, remote_host, remote_port)
-        threading.Thread.__init__(self)
+        sys.stdout.flush()
         self.local_port=int(local_port)
         self.local_ip=local_ip
         self.local_proto=local_proto
         self.remote_port=int(remote_port)
         self.remote_host=remote_host
         self.remote_proto=remote_proto
+        self.local_cert=local_cert
+        self.local_key=local_key
+        self.remote_cert=remote_cert
+        self.remote_key=remote_key
+        self.request_extra_headers=request_extra_headers
+        self.response_extra_headers=response_extra_headers
+        self.request_regexps=request_regexps or []
+        self.response_regexps=response_regexps or []
         self.IPv6=IPv6
         self.timeout=timeout
+        self.sock=None
+        self.run()
 
     def run(self,handler=ConnectionHandler):
         import thread
@@ -163,52 +228,80 @@ class Tunnel(threading.Thread):
         else:
             sock_type=socket.AF_INET
         
-        ## Only python >=3.2
-        #if self.local_proto == 'https':
-        #    context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
-        #    context.load_cert_chain(certfile=CERTFILE, keyfile=KEYFILE)
-
-        sock = socket.socket(sock_type)
-        sock.bind((self.local_ip, self.local_port))
-        print "Serving on %s:%d."%(self.local_ip, self.local_port)
-        sock.listen(5)
-        while 1:
-            conn, addr=sock.accept()
-            if self.local_proto == 'https':
-                conn = ssl.wrap_socket(conn, certfile=CERTFILE, keyfile=KEYFILE, server_side=True)
-            thread.start_new_thread(handler, 
-                    (conn, addr, self.timeout,self.remote_host,self.remote_port,
-                            self.local_proto,self.remote_proto))
-        sock.close()
+        try:
+            self.sock = socket.socket(sock_type)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind((self.local_ip, self.local_port))
+            print "Serving on %s:%d."%(self.local_ip, self.local_port)
+            sys.stdout.flush()
+            self.sock.listen(5)
+            while 1:
+                try:
+                    conn, addr=self.sock.accept()
+                    if self.local_proto == 'https':
+                        conn = ssl.wrap_socket(conn, certfile=self.local_cert, keyfile=self.local_key, server_side=True)
+                    newthread=thread.start_new_thread(handler, 
+                            (conn, addr, self.remote_host, self.remote_port,
+                                    self.local_proto, self.remote_proto,
+                                    self.remote_cert, self.remote_key,
+                                    self.request_regexps, self.response_regexps,
+                                    self.request_extra_headers, self.response_extra_headers))
+                except ssl.SSLError, e:
+		    print e
+                    sys.stdout.flush()
+                    pass
+        finally:
+            self.stop()
+    
+    def stop(self):
+        print "Stopping.."
+        sys.stdout.flush()
+        self.sock.close()
 
 
 def parse_config(conf_file):
-    config = ConfigParser.SafeConfigParser({'local_port': '8080', 
+    config = ConfigParser.SafeConfigParser({'local_port': '8888', 
                                         'local_proto': 'http',
-                                        'remote_port': '80',
+                                        'local_cert': 'server.crt',
+                                        'local_key': 'server.key',
+                                        'remote_port': '8080',
                                         'remote_host': 'localhost',
                                         'remote_proto': 'http',
+                                        'remote_cert': 'server.crt',
+                                        'remote_key': 'server.key',
+                                        'request_regexp': '',
+                                        'response_regexp':'',
                                         'request_extra_headers': 'X-Tunneled-From: %(local_proto)://%(local_ip):%(local_port)',
                                         'response_extra_headers': 'X-Tunneled-To: %(remote_proto)://%(remote_host):%(remote_port)'})
-    threads=[]
     config.read(conf_file)
     for section in config.sections():
+        ### todo, launch a thread for each section, not only the first one.
         local_port=config.get(section, 'local_port')
         local_ip=config.get(section, 'local_ip')
         local_proto=config.get(section, 'local_proto')
+        local_cert=config.get(section, 'local_cert')
+        local_key=config.get(section, 'local_key')
         remote_port=config.get(section, 'remote_port')
         remote_host=config.get(section, 'remote_host')
         remote_proto=config.get(section, 'remote_proto')
-        request_extra_headers=config.get(section, 'request_extra_headers',1)
-        response_extra_headers=config.get(section, 'response_extra_headers',1)
+        remote_cert=config.get(section, 'remote_cert')
+        remote_key=config.get(section, 'remote_key')
+        request_extra_headers=[header.strip() for header in config.get(section, 'request_extra_headers').split(',')]
+        response_extra_headers=[header.strip() for header in config.get(section, 'response_extra_headers').split(',')]
+        request_regexps=[ tuple(pair.split(':')) for pair in config.get(section, 'request_regexps').split(',') ]
+        if request_regexps == [('',)]: request_regexps=[]
+        response_regexps=[ tuple(pair.split(':')) for pair in config.get(section, 'response_regexps').split(',') ]
+        if response_regexps == [('',)]: response_regexps=[]
         print "Starting tunnel '%s'\n\t%s://%s:%s --> %s://%s:%s"\
                 %(section,local_proto,local_ip,local_port,remote_proto,remote_host,remote_port)
-        #start_server(local_port, local_ip, local_proto,remote_port, remote_host, remote_proto, request_extra_headers, response_extra_headers)
-        newserver=Tunnel(local_port=local_port, local_ip=local_ip, local_proto=local_proto,
+        sys.stdout.flush()
+        server=Tunnel(local_port=local_port, local_ip=local_ip, local_proto=local_proto,
+                local_cert=local_cert, local_key=local_key,
                 remote_port=remote_port, remote_host=remote_host, remote_proto=remote_proto,
-                request_extra_headers=request_extra_headers, response_extra_headers=response_extra_headers)
-        threads.append(newserver)
-    return threads
+                remote_cert=remote_cert, remote_key=remote_key,
+                request_extra_headers=request_extra_headers, response_extra_headers=response_extra_headers,
+                request_regexps=request_regexps, response_regexps=response_regexps)
+        return server
 
 def create_sample_config(conf_file):
     config = ConfigParser.RawConfigParser()
@@ -217,45 +310,59 @@ def create_sample_config(conf_file):
     config.set('Sample', 'local_port', '8080')
     config.set('Sample', 'local_ip', '127.0.0.1')
     config.set('Sample', 'local_proto', 'http')
+    config.set('Sample', 'local_cert', 'server.crt')
+    config.set('Sample', 'local_key', 'server.key')
     config.set('Sample', 'remote_host', 'localhost')
     config.set('Sample', 'remote_port', '80')
     config.set('Sample', 'remote_proto', 'http')
-    config.set('Sample', 'request_extra_headers', 'X-Tunneled-From: %(local_proto)://%(local_ip):%(local_port)')
-    config.set('Sample', 'response_extra_headers', 'X-Tunneled-To: %(remote_proto)://%(remote_host):%(remote_port)')
-    with open(conf_file, 'wb') as configfile:
+    config.set('Sample', 'remote_cert', '%(local_cert)s')
+    config.set('Sample', 'remote_key', '$(local_key)s')
+    config.set('Sample', 'request_extra_headers', 'X-Tunneled-From: %(local_proto)s://%(local_ip)s:%(local_port)s')
+    config.set('Sample', 'response_extra_headers', 'X-Tunneled-To: %(remote_proto)s://%(remote_host)s:%(remote_port)s')
+    config.set('Sample', 'request_regexps', 'regexp1:subst1,regexp2:subst2')
+    config.set('Sample', 'response_regexps', 'regexp1:subst1,regexp2:subst2')
+    configfile=open(conf_file, 'wb')
+    try:
         config.write(configfile)
+    finally:
+        configfile.close()
+    
         
      
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Simple and agile transparent HTTP/HTTPS Proxy')
-    parser.add_argument('--local_port', metavar='local_port', type=int, default=8080, help='Source port to listen to')
+    parser.add_argument('--local_ip', metavar='local_ip', default='0.0.0.0', help='Source ip to listen to')
+    parser.add_argument('--local_port', metavar='local_port', type=int, default=8888, help='Source port to listen to')
     parser.add_argument('--remote_host', metavar='remote_host', default='127.0.0.1', help='Host to connect to')
-    parser.add_argument('--remote_port', metavar='remote_port', type=int, default=80, help='Port to connect to')
+    parser.add_argument('--remote_port', metavar='remote_port', type=int, default=8080, help='Port to connect to')
     parser.add_argument('--config', metavar='conf_file', help='Configuration file, overrides all the other options')
+    parser.add_argument('--debug', default=False, action='store_true', help='Verbose mode, dump all the requests and responses.')
+    parser.add_argument('--create_config', action='store_true', default=False, help='Create a sample config file')
 
     args = parser.parse_args()
     
-    threads=[]
-
-    if args.config:
-        if os.path.isfile(args.config):
-            threads=parse_config(args.config)
-        else:
-            print "Config file %s not found..."%args.config
-            sys.exit(0)
-    else:
-        local_port=args.local_port
-        remote_host=args.remote_host
-        remote_port=args.remote_port
+    if args.create_config:
         if not os.path.isfile(CONFFILE):
             print "Sample config file created at %s"%CONFFILE
             create_sample_config(CONFFILE)
-        server=Tunnel(local_port=local_port,remote_host=remote_host,remote_port=remote_port)
-        threads.append(server)
+        else:
+            print "Config file %s already exists."%CONFFILE
+        sys.exit(0)
 
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-        
+    try:
+        if args.config:
+            if os.path.isfile(args.config):
+                parse_config(args.config)
+            else:
+                print "Config file %s not found..."%args.config
+                sys.exit(0)
+        else:
+                local_ip=args.local_ip
+                local_port=args.local_port
+                remote_host=args.remote_host
+                remote_port=args.remote_port
+                server=Tunnel(local_ip=local_ip,local_port=local_port,remote_host=remote_host,remote_port=remote_port)
+    except KeyboardInterrupt:
+        print "Exiting."
+
 
