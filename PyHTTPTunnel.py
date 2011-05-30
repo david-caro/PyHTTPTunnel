@@ -85,36 +85,39 @@ class ConnectionHandler:
             if DEBUG: print "::::::::: ERROR ::: Method %s not supported yet."%method
             sys.stdout.flush()
             return False
-        if DEBUG: print '::::::::: REQUEST FROM CLIENT %s:%s'%self.client.getpeername()+' ::::\n%s\n::::::::::'%(headers+'\r\n\r\n'+data)
+        #if DEBUG: print '::::::::: REQUEST FROM CLIENT %s:%s'%self.client.getpeername()+' ::::\n%s\n::::::::::'%(headers+'\r\n\r\n'+data)
+        if DEBUG: print '::::::::: REQUEST FROM CLIENT %s:%s'%self.client.getpeername()+' ::::\n%s\n%d\n::::::::::'%(headers,len(data))
         sys.stdout.flush()
         # parse the data and make the substitutions
         if data: fixed_data=self.parse_data(data,self.request_regexps)
         else: fixed_data=data
-        # fix the content lenght if necessary and add the aditional haeders
-        if headers: 
-            fixed_headers=self.fix_content_length(headers,len(fixed_data))
-        else:
-            fixed_headers=headers
+        # fix the content lenght if necessary and set the HTTP version to 1.0 (chunks not supported yet)
+        fixed_headers=self.fix_content_length(headers,len(fixed_data))
+        fixed_headers=self.fix_http_version(fixed_headers)
         fixed_headers=fixed_headers+'\r\n'+'\r\n'.join(self.request_extra_headers)
         # assemble the request
         fixed_request=fixed_headers+'\r\n\r\n'+fixed_data
-        if DEBUG: print '::::::::: REQUEST TO TARGET %s:%s'%self.target.getpeername()+' ::::\n%s\n::::::::::'%(fixed_request)
+        #if DEBUG: print '::::::::: REQUEST TO TARGET %s:%s'%self.target.getpeername()+' ::::\n%s\n::::::::::'%(fixed_request)
+        if DEBUG: print '::::::::: REQUEST TO TARGET %s:%s'%self.target.getpeername()+' ::::\n%s\n%d\n::::::::::'%(fixed_headers,len(fixed_data))
         sys.stdout.flush()
         return fixed_request
+
 
     def get_response(self):
         headers, data=self.get_headers(conn=self.target,old_data='')
         if DEBUG: print "Got response headers"
+        if DEBUG: print headers
         content_length=self.get_content_length(headers)
-        if DEBUG: print "lllllllllllllllllllllllllllll %d"%(len(data)+4+len(headers))
-        if content_length:
+        if not content_length or content_length=='chunked':
             data=self.get_data(conn=self.target,length=content_length,old_data=data)
-        elif len(data)+4+len(headers)==BUFLEN:
-            data=self.get_data(conn=self.target,old_data=data)
-        if DEBUG: print '::::::::: RESPONSE FROM TARGET  %s:%s'%self.target.getpeername()+'::::\n%s\n::::::::::'%(headers+'\r\n\r\n'+data)
+        elif len(data)<content_length:
+            data=self.get_data(conn=self.target,length=content_length,old_data=data)
+        #if DEBUG: print '::::::::: RESPONSE FROM TARGET  %s:%s'%self.target.getpeername()+'::::\n%s\n::::::::::'%(headers+'\r\n\r\n'+data)
+        if DEBUG: print '::::::::: RESPONSE FROM TARGET  %s:%s'%self.target.getpeername()+'::::\n%s\n%d\n::::::::::'%(headers,len(data))
         sys.stdout.flush()
         # parse the data and make the substitutions
         if data: fixed_data=self.parse_data(data,self.response_regexps)
+        else: fixed_data=data
         # fix the content lenght if necessary and add the aditional haeders
         if headers:
             fixed_headers=self.fix_content_length(headers,len(fixed_data))
@@ -123,13 +126,18 @@ class ConnectionHandler:
         fixed_headers=fixed_headers+'\r\n'+'\r\n'.join(self.response_extra_headers)
         # assemble the response
         fixed_response=fixed_headers+'\r\n\r\n'+fixed_data
-        if DEBUG: print '::::::::: RESPONSE TO CLIENT %s:%s'%self.client.getpeername()+'::::\n%s\n::::::::::'%(fixed_response)
+        #if DEBUG: print '::::::::: RESPONSE TO CLIENT %s:%s'%self.client.getpeername()+'::::\n%s\n::::::::::'%(fixed_response)
+        if DEBUG: print '::::::::: RESPONSE TO CLIENT %s:%s'%self.client.getpeername()+'::::\n%s\n%d\n::::::::::'%(fixed_headers,len(fixed_data))
         sys.stdout.flush()
         return fixed_response
 
     def fix_content_length(self,headers,new_length):
         pattern=r'Content-Length: \d+'
         return re.sub(pattern, 'Content-Length: %d'%new_length, headers)
+
+    def fix_http_version(self,headers):
+        pattern=r'HTTP/1.1'
+        return re.sub(pattern, 'HTTP/1.0', headers)
 
     def parse_data(self, data, regexps):
         fixeddata=data
@@ -145,9 +153,21 @@ class ConnectionHandler:
         return method, data
 
     def get_content_length(self, headers):
-        result=re.search('Content-Length: (?P<content_length>\d+)',headers)
-        content_length=result.group('content_length')
-        return content_length and int(content_length)
+        result_length=re.search('Content-Length: (?P<content_length>\d+)',headers)
+        if result_length:
+            content_length=int(result_length.group('content_length'))
+        else:
+            result_type=re.search('Transfer-Encoding: (?P<encoding>chunked)',headers)
+            if result_type:
+                content_length='chunked'
+            else:
+                result_close=re.search('Connection: (?P<close>close)',headers)
+                if result_close:
+                    content_length='close'
+                else:
+                    content_length=None
+        print "Got content-length:", content_length
+        return content_length
 
     def get_headers(self,conn,old_data,extra_headers=''):
         headers=old_data
@@ -164,14 +184,48 @@ class ConnectionHandler:
         sys.stdout.flush()
         return headers[:end],headers[end+4:]
 
+    def get_chunk(self,conn,data):
+    ## TODO
+        end=data.find('\r\n')
+        while end == -1:
+            data+=conn.recv(BUFLEN)
+            end=data.find('\r\n')
+        headers=data[:end]
+        print headers
+        length=int(headers, 16)
+        print "Got chunk of %d bytes:"%length
+        if length==0:
+            return headers, False
+        body=data[end+2]
+        while len(body)<length+2:
+            body+=conn.recv(length+2-len(body))
+        print "%d"%len(body[:length])
+        return headers+'\r\n'+body[:length],body[length+2:] 
+
     def get_data(self,conn,length=None,old_data=''):
         data=old_data
-        if length==None:
+        if length=='chunked':
+        # this means that the server will use http1.1 chunk protocol to send the response
+            chunk, next_data=self.get_chunk(conn,data)
+            data=chunk
+            while next_data != False: 
+                chunk, next_data=self.get_chunk(conn,next_data)
+                data+=chunk
+        elif length=='close':
+        # this means that the server will close the connection, so we have to read everything we can.
+            while 1:
+                newdata=conn.recv(BUFLEN)
+                data=data+newdata
+                if not newdata: break
+        elif length==None:
+        # This means that the server did not send a Content-Length header and did not 
+        # specify content-transer chunked nor connection: close, usually a malformed response.
             while 1:
                 newdata=conn.recv(BUFLEN)
                 data=data+newdata
                 if len(newdata)<BUFLEN: break
         else:
+        # The server sent a Content-Length header so we read the specified amount od words.
             while len(data)<length:
                 data+=conn.recv(length-len(data))
         return data
@@ -348,6 +402,8 @@ if __name__ == '__main__':
         else:
             print "Config file %s already exists."%CONFFILE
         sys.exit(0)
+
+    DEBUG = args.debug
 
     try:
         if args.config:
