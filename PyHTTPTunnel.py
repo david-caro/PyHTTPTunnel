@@ -323,8 +323,8 @@ def parse_config(conf_file):
                                         'remote_proto': 'http',
                                         'remote_cert': 'server.crt',
                                         'remote_key': 'server.key',
-                                        'request_regexp': '',
-                                        'response_regexp':'',
+                                        'request_regexps': '',
+                                        'response_regexps':'',
                                         'request_extra_headers': 'X-Tunneled-From: %(local_proto)://%(local_ip):%(local_port)',
                                         'response_extra_headers': 'X-Tunneled-To: %(remote_proto)://%(remote_host):%(remote_port)'})
     config.read(conf_file)
