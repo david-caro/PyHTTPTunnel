@@ -337,8 +337,13 @@ class Tunnel:
             self.sock.listen(5)
             while 1:
                 try:
+                    count=0
                     while threading.activeCount() > 100:
+                        count=count+1
                         time.sleep(0.1)
+                        if count==100:
+                            log("Max threads reached... waiting for someone to end...",self.logfile)
+                            count=0
                     newconn, addr=self.sock.accept()
                     log('Connected from %s:%d'%addr,self.logfile)
                     if self.local_proto == 'https':
@@ -355,11 +360,6 @@ class Tunnel:
                             continue
                     else:
                         conn=newconn
-                    if threading.activeCount() > 100:
-                        log('Max threads reached... dropping the connection',self.logfile)
-                        conn.shutdown(socket.SHUT_RDWR)
-                        conn.close()
-                        continue
                     log('Threads running:%d'%threading.activeCount(),self.logfile)
                     ##newthread=thread.start_new_thread(handler, 
                     #        (conn, addr, self.remote_host, self.remote_port,
