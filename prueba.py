@@ -1,9 +1,12 @@
-#!/usr/bin/env python
+## Test of multiprocessing server with queues
+#!/usr/bin/env python 
 import multiprocessing as mp
 import os
 
 
 
+## This is the worker class, gets the messages from the queue and executes a 
+## job.
 class Worker:
     def __init__(self, queue):
         self.queue=queue
@@ -19,9 +22,9 @@ def f(queue):
     print 'process id:', os.getpid()
     print "worker up!"
     while 1:
-            job=queue.get()
-            print os.getpid(), '     got job'
-            print job
+        job=queue.get()
+        print os.getpid(), '     got job'
+        print job
         
 
 class Main:
