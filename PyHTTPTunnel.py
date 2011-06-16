@@ -24,7 +24,6 @@ Author: David Caro <david.caro.estevez@member.fsf.org
 
 import os
 import sys
-import thread
 import threading 
 import re
 import time
@@ -39,17 +38,18 @@ BUFLEN = 4096
 CONFFILE = 'pytunnel.conf'
 DEBUG = False
 
-def log(message, logfile=None):
+def log(message, logfile=None, level='INFO'):
     """
     Simple log function that appends the thread id to the message, only if the 
     debug option is enabled.
 
     """
-    if DEBUG: 
+    if DEBUG or level == 'CRIT': 
         if logfile: 
-            logfile.write(':%d::::%s\n' % (thread.get_ident(), message))
+            logfile.write(':%s::::%s\n' % (threading.current_thread(), 
+                                            message))
             logfile.flush()
-        print ':%d::::%s' % (thread.get_ident(), message)
+        print ':%s::::%s' % (threading.current_thread(), message)
         sys.stdout.flush()
 
 
@@ -60,7 +60,7 @@ class ConnectionHandler:
 
     """
 
-    def __init__(self, connection, 
+    def __init__(self, logfile, connection, 
                     remote_host, remote_port, 
                     local_proto='http', remote_proto='http',
                     remote_cert='server.crt', remote_key='server.key',
@@ -78,35 +78,41 @@ class ConnectionHandler:
         self.request_regexps = request_regexps or []
         self.response_regexps = response_regexps or []
         self.target = None
+        self.logfile = open(logfile, 'a')
+
+        print "THREAD DEBUG=",DEBUG
+        sys.stdout.flush()
 
         try:
             self.target = self.connect_to_target()
-            log('connected to %s:%s.' % (remote_host, remote_port))
+            log('connected to %s:%s.' % (remote_host, remote_port), 
+                    self.logfile)
             if not self.target: 
-                log("Can't connect to %s:%s." % (remote_host, remote_port))
+                log("Can't connect to %s:%s." % (remote_host, remote_port), 
+                        self.logfile)
                 return
-            log('fetching request...')
+            log('fetching request...', self.logfile)
             request = self.get_request()
-            log('got request')
+            log('got request', self.logfile)
             if not request: 
                 return 
             self.target.sendall('%s' % request)
-            log('Sent request')
+            log('Sent request', self.logfile)
             response = self.get_response()
-            log('Got reponse')
+            log('Got reponse', self.logfile)
             self.client.sendall('%s' % response)
-            log('Sent reponse')
+            log('Sent reponse', self.logfile)
         finally:
             if self.target: 
-                log('Shutdowning socket target')
+                log('Shutdowning socket target', self.logfile)
                 self.target.shutdown(socket.SHUT_RDWR)
-                log('Closing socket target')
+                log('Closing socket target', self.logfile)
                 self.target.close()
-            log('Shutdowning socket client')
+            log('Shutdowning socket client', self.logfile)
             self.client.shutdown(socket.SHUT_RDWR)
-            log('Closing socket client')
+            log('Closing socket client', self.logfile)
             self.client.close()
-            log('Sockets closed')
+            log('Sockets closed', self.logfile)
 
     def get_request(self):
         """
@@ -114,8 +120,8 @@ class ConnectionHandler:
         request.
 
         """
-        log('get_request')
-        self.client.settimeout(30.0)
+        log('get_request', self.logfile)
+        self.client.settimeout(60.0)
         method, data = self.get_request_method()
         headers, data = self.get_headers(conn=self.client, old_data=data)
         if method == 'POST':
@@ -123,12 +129,14 @@ class ConnectionHandler:
             data = self.get_data(conn=self.client,
                     length=content_length, old_data=data)
         elif not method == 'GET':
-            log("::::::::: ERROR ::: Method %s not supported yet." % method)
+            log("::::::::: ERROR ::: Method %s not supported yet." % method, 
+                self.logfile)
             return False
         # log('::::::::: REQUEST FROM CLIENT %s:%s' % self.client.getpeername()
         # + ' ::::\n%s\n::::::::::' % (headers + '\r\n\r\n' + data))
         log('::::::::: REQUEST FROM CLIENT %s:%s' % self.client.getpeername() +
-            ' ::::\n%s\n%d\n::::::::::' % (headers, len(data)))
+            ' ::::\n%s\n%d\n::::::::::' % (headers, len(data)), 
+            self.logfile)
         # parse the data and make the substitutions
         if data: 
             fixed_data = self.parse_data(data, self.request_regexps)
@@ -140,7 +148,7 @@ class ConnectionHandler:
         fixed_headers = self.fix_http_version(fixed_headers)
         if fixed_headers == False:
             log('::::::::: MALFORMED REQUEST MISSING HTTP VERSION HEADER ::::'+
-                ':::::')
+                ':::::', self.logfile)
             return False
         fixed_headers = fixed_headers + '\r\n' + \
             '\r\n'.join(self.request_extra_headers)
@@ -149,7 +157,8 @@ class ConnectionHandler:
         # log('::::::::: REQUEST TO TARGET %s:%s' % self.target.getpeername() +
         # ' ::::\n%s\n::::::::::' % (fixed_request))
         log('::::::::: REQUEST TO TARGET %s:%s' % self.target.getpeername() +
-            ' ::::\n%s\n%d\n::::::::::' % (fixed_headers, len(fixed_data)))
+            ' ::::\n%s\n%d\n::::::::::' % (fixed_headers, len(fixed_data)), 
+            self.logfile)
         return fixed_request
 
     def get_response(self):
@@ -158,10 +167,10 @@ class ConnectionHandler:
         return the parsed response.
 
         """
-        log('get_response')
+        log('get_response', self.logfile)
         headers, data = self.get_headers(conn=self.target, old_data='')
-        log("Got response headers")
-        log(headers)
+        log("Got response headers", self.logfile)
+        log(headers, self.logfile)
         content_length = self.get_content_length(headers)
         if not content_length or content_length == 'chunked':
             data = self.get_data(conn=self.target, length=content_length,
@@ -173,8 +182,9 @@ class ConnectionHandler:
         #       self.target.getpeername() + '::::\n%s\n::::::::::' % 
         #       (headers + '\r\n\r\n' + data))
         log('::::::::: RESPONSE FROM TARGET  %s:%s' % 
-            self.target.getpeername() + '::::\n%s\n%d\n::::::::::' % 
-                                        (headers , len(data)))
+            self.target.getpeername() + 
+            '::::\n%s\n%d\n::::::::::' % (headers , len(data)),
+            self.logfile)
         # parse the data and make the substitutions
         if data: 
             fixed_data = self.parse_data(data, self.response_regexps)
@@ -188,7 +198,7 @@ class ConnectionHandler:
         fixed_headers = self.fix_http_version(fixed_headers)
         if fixed_headers == False:
             log('::::::::: MALFORMED RESPONSE MISSING HTTP VERSION HEADER' +
-                ':::::::::')
+                ':::::::::', self.logfile)
             return False
         fixed_headers = fixed_headers + '\r\n' + \
                         '\r\n'.join(self.response_extra_headers)
@@ -197,7 +207,8 @@ class ConnectionHandler:
         # log('::::::::: RESPONSE TO CLIENT %s:%s' % self.client.getpeername() +
         #       '::::\n%s\n::::::::::' % (fixed_response))
         log('::::::::: RESPONSE TO CLIENT %s:%s' % self.client.getpeername() +
-            '::::\n%s\n%d\n::::::::::' % (fixed_headers, len(fixed_data)))
+            '::::\n%s\n%d\n::::::::::' % (fixed_headers, len(fixed_data)),
+            self.logfile)
         return fixed_response
 
     def fix_content_length(self, headers, new_length):
@@ -205,7 +216,7 @@ class ConnectionHandler:
         Given the new content length, fig the header content length.
 
         """
-        log('fix_content_length')
+        log('fix_content_length', self.logfile)
         pattern = r'Content-Length: \d+'
         return re.sub(pattern, 'Content-Length: %d' % new_length, headers)
 
@@ -215,7 +226,7 @@ class ConnectionHandler:
         of HTTP.
 
         """
-        log('fix_http_version')
+        log('fix_http_version', self.logfile)
         pattern = r'HTTP/[\d].[\d]*'
         result = re.search(pattern, headers)
         if result:
@@ -228,7 +239,7 @@ class ConnectionHandler:
         Apply the regexps to the data.
 
         """
-        log('parse_data')
+        log('parse_data', self.logfile)
         fixeddata = data
         for regexp, substitute in regexps:
             fixeddata = re.sub(regexp, substitute, fixeddata)
@@ -239,11 +250,9 @@ class ConnectionHandler:
         Get the request method, only GET and POST are supported yet.
 
         """
-        log('get_request_method')
-        method = ''
+        log('get_request_method', self.logfile)
         data = self.client.recv(BUFLEN)
-        if method == '':
-            method = data.split(' ', 1)[0]
+        method = data.split(' ', 1)[0]
         return method, data
 
     def get_content_length(self, headers):
@@ -253,7 +262,7 @@ class ConnectionHandler:
         Transfer-Encoding is chunked or the content length.
 
         """
-        log('get_content_length')
+        log('get_content_length', self.logfile)
         result_length = re.search('Content-Length: (?P<content_length>\d+)', 
                                     headers)
         if result_length:
@@ -270,7 +279,7 @@ class ConnectionHandler:
                     content_length = 'chunked'
                 else:
                     content_length = None
-        log("Got content-length%s:" % content_length)
+        log("Got content-length%s:" % content_length, self.logfile)
         return content_length
 
     def print_oct(self, string):
@@ -278,22 +287,22 @@ class ConnectionHandler:
         Prints the input in octal, for debugging.
 
         """
-        print string
+        log(string, self.logfile)
         for char in string:
-            print '-', ord(char), '-',
+            log('-%s-' % ord(char), self.logfile)
     
     def get_headers(self, conn, old_data):
         """
         Recover the headers, return the headers and the rest of the read data.
 
         """
-        log('get_headers')
+        log('get_headers', self.logfile)
         headers = old_data
         newdata = ''
         end = headers.find('\r\n\r\n') 
         if end == -1: 
             end = headers.find('\n\n')
-        #print 'end=%d'%end
+        #log('end=%d' % end, self.logfile)
         #self.print_oct(headers)
         if end >= 0:
             return headers[:end], headers[end+4:]
@@ -303,7 +312,7 @@ class ConnectionHandler:
             end = headers.find('\r\n\r\n')
             if end == -1: 
                 end = headers.find('\n\n')
-            #print 'end=%d'%end
+            #log('end=%d' % end, self.logfile)
             #self.print_oct(headers)
             if end >= 0 : 
                 break
@@ -316,20 +325,20 @@ class ConnectionHandler:
         the rest of the readen data.
         
         """
-        log('get_chunk')
+        log('get_chunk', self.logfile)
         end = data.find('\r\n')
         while end == -1:
             data += conn.recv(BUFLEN)
             end = data.find('\r\n')
         headers = data[:end]
         length = int(headers, 16)
-        log("Got chunk of %d bytes:" % length)
+        log("Got chunk of %d bytes:" % length, self.logfile)
         if length == 0:
             return headers, False
         body = data[end+2]
         while len(body) < length + 2:
             body += conn.recv(length + 2 - len(body))
-        log("%d" % len(body[:length]))
+        log("%d" % len(body[:length]), self.logfile)
         return headers + '\r\n' + body[:length], body[length + 2:] 
 
     def get_data(self, conn, length=None, old_data=''):
@@ -338,12 +347,12 @@ class ConnectionHandler:
         connection to end or (TODO) using the chunked protocol.
 
         """
-        log('get_data')
+        log('get_data', self.logfile)
         data = old_data
         if length == 'chunked':
         # this means that the server will use http1.1 chunk protocol to send the
         # response
-            log('get_data::length=chunked')
+            log('get_data::length=chunked', self.logfile)
             chunk, next_data = self.get_chunk(conn, data)
             data = chunk
             while next_data != False: 
@@ -352,7 +361,7 @@ class ConnectionHandler:
         elif length == 'close':
         # this means that the server will close the connection, so we have to 
         # read everything we can.
-            log('get_data::length=close')
+            log('get_data::length=close', self.logfile)
             while 1:
                 newdata = conn.recv(BUFLEN)
                 data = data + newdata
@@ -362,16 +371,16 @@ class ConnectionHandler:
         # This means that the server did not send a Content-Length header and 
         # did not specify content-transer chunked nor connection: close, usually
         # a malformed response.
-            log('get_data::length=None')
+            log('get_data::length=None', self.logfile)
             while 1:
                 newdata = conn.recv(BUFLEN)
-                data = data + newdata
+                data += newdata
                 if len(newdata) < BUFLEN: 
                     break
         else:
         # The server sent a Content-Length header so we read the specified
         # amount od words.
-            log('get_data::length=%s' % length)
+            log('get_data::length=%s' % length, self.logfile)
             while len(data) < length:
                 data += conn.recv(length - len(data))
         return data
@@ -381,19 +390,19 @@ class ConnectionHandler:
         Connects to the target machine.
 
         """
-        log('connect_to_target')
+        log('connect_to_target', self.logfile)
         (soc_family, _, _, _, address) = socket.getaddrinfo(self.remote_host, 
                                                 self.remote_port)[0]
         target = socket.socket(soc_family)
-        target.settimeout(30.0)
+        target.settimeout(60.0)
         if self.remote_proto == 'https':
             try:
                 target = ssl.wrap_socket(target)
             except Exception, exc:
-                print "::::::::: ERROR :::: Exception encountered attending" + \
-                        "remote %s:%d." % (self.remote_host, self.remote_port)
+                log("::::::::: ERROR :::: Exception encountered attending" + \
+                        "remote %s:%d." % (self.remote_host, self.remote_port),
+                        self.logfile)
                 print exc
-                sys.stdout.flush()
                 target.shutdown(socket.SHUT_RDWR)
                 target.close()
                 return None
@@ -407,7 +416,9 @@ class Tunnel:
     launches the threads.
 
     """
-    def __init__(self,
+    def __init__(self, max_threads=100, 
+            main_logfile='tunnel-main-sample.log', 
+            threads_logfile='tunnel-threads-sample.log',
             local_port=8888, local_ip='127.0.0.1', local_proto='http', 
             remote_port=8080, remote_host='127.0.0.1', remote_proto='http',
             local_cert='server.crt', local_key='server.key',
@@ -415,9 +426,7 @@ class Tunnel:
             request_extra_headers='', response_extra_headers='',
             request_regexps=None, response_regexps=None,
             ipv6=False, timeout=60):
-        print "Starting thread server at %s://%s:%s --> %s://%s:%s" % \
-                ( local_proto, local_ip, local_port, 
-                    remote_proto, remote_host, remote_port)
+        self.logfile = open(main_logfile,'a')
         sys.stdout.flush()
         self.local_port = int(local_port)
         self.local_ip = local_ip
@@ -436,8 +445,13 @@ class Tunnel:
         self.ipv6 = ipv6
         self.timeout = timeout
         self.sock = None
-        self.logfile = open('main.log','w')
-        self.threads = []
+        self.max_threads = max_threads
+        self.threads_logfile = threads_logfile
+
+        log("Starting thread server at %s://%s:%s --> %s://%s:%s" % \
+                ( local_proto, local_ip, local_port, 
+                    remote_proto, remote_host, remote_port),
+                self.logfile, 'CRIT')
         self.run()
 
     def run(self, handler=ConnectionHandler):
@@ -455,16 +469,15 @@ class Tunnel:
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.bind((self.local_ip, self.local_port))
             log("Serving on %s:%d." % (self.local_ip, self.local_port), 
-                 self.logfile)
-            sys.stdout.flush()
+                 self.logfile, 'CRIT')
             self.sock.listen(5)
             while 1:
                 try:
                     count = 0
-                    while threading.activeCount() > 100:
+                    while threading.activeCount() > self.max_threads:
                         count = count+1
                         time.sleep(0.1)
-                        if count == 100:
+                        if count == self.max_threads:
                             log("Max threads reached... waiting for someone " +
                                 "to end...",self.logfile)
                             count = 0
@@ -482,27 +495,18 @@ class Tunnel:
                                                                 addr[1], 
                                                                 exc), 
                                         self.logfile)
-                            sys.stdout.flush()
-                            print "closing"
+                            log("closing", self.logfile)
                             newconn.send('ERROR:wrong proto!')
                             newconn.shutdown(socket.SHUT_RDWR)
                             newconn.close()
-                            print "closed"
+                            log("closed", self.logfile)
                             continue
                     else:
                         conn = newconn
                     log('Threads running:%d' % threading.activeCount(), 
                             self.logfile)
-                    ##newthread=thread.start_new_thread(handler, 
-                    #        (conn, addr, self.remote_host, self.remote_port,
-                    #                self.local_proto, self.remote_proto,
-                    #                self.remote_cert, self.remote_key,
-                    #                self.request_regexps, 
-                    #                self.response_regexps,
-                    #                self.request_extra_headers, 
-                    #                self.response_extra_headers))
                     newthread = threading.Thread(target=handler, 
-                            args=(conn,  
+                            args=(self.threads_logfile, conn,  
                                     self.remote_host, self.remote_port,
                                     self.local_proto, self.remote_proto,
                                     self.remote_cert, self.remote_key,
@@ -510,13 +514,11 @@ class Tunnel:
                                     self.request_extra_headers, 
                                     self.response_extra_headers))
                     newthread.start()
-                    #self.threads.append(newthread)
                 except KeyboardInterrupt:
                     break
                 except Exception, exc:
-                    log("ERROR on main loop", self.logfile)
-                    log('%s' % exc, self.logfile)
-                    sys.stdout.flush()
+                    log("ERROR on main loop", self.logfile, 'CRIT')
+                    log('%s' % exc, self.logfile, 'CRIT')
         finally:
             self.stop()
     
@@ -526,12 +528,15 @@ class Tunnel:
 
         """
         log("waiting for threads to end", self.logfile)
-        #for thread in self.threads:
-        #    thread.join()
+        log("Threads still alive:\n\t", self.logfile)
+        for thread in threading.enumerate():
+            log("\tThread %s" % thread.getName(), self.logfile)
         log("Stopping..", self.logfile)
-        sys.stdout.flush()
-        self.sock.shutdown(socket.SHUT_RDWR)
-        self.sock.close()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+            self.sock.close()
+        except:
+            pass
         self.logfile.close()
 
 
@@ -541,7 +546,10 @@ def parse_config(conf_file):
 
     """
     config = ConfigParser.SafeConfigParser(
-                {'local_port': '8888', 
+                {'max_threads': '100',
+                'main_logfile': 'tunnel-main-sample.log',
+                'threads_logfile': 'tunnel-threads-sample.log',
+                'local_port': '8888', 
                 'local_proto': 'http',
                 'local_cert': 'server.crt',
                 'local_key': 'server.key',
@@ -559,6 +567,9 @@ def parse_config(conf_file):
     config.read(conf_file)
     for section in config.sections():
         ### todo, launch a thread for each section, not only the first one.
+        max_threads = config.get(section, 'max_threads')
+        main_logfile = config.get(section, 'main_logfile')
+        threads_logfile = config.get(section, 'threads_logfile')
         local_port  = config.get(section, 'local_port')
         local_ip = config.get(section, 'local_ip')
         local_proto = config.get(section, 'local_proto')
@@ -585,11 +596,10 @@ def parse_config(conf_file):
                                             'response_regexps').split(',')]
         if response_regexps == [('',)]: 
             response_regexps = []
-        print "Starting tunnel '%s'\n\t%s://%s:%s --> %s://%s:%s" % \
-                (section, local_proto, local_ip, local_port, 
-                    remote_proto, remote_host, remote_port)
-        sys.stdout.flush()
-        server = Tunnel(local_port=local_port, 
+        server = Tunnel(max_threads=max_threads,
+                        main_logfile=main_logfile,
+                        threads_logfile=threads_logfile,
+                        local_port=local_port, 
                         local_ip=local_ip, 
                         local_proto=local_proto,
                         local_cert=local_cert, 
@@ -612,7 +622,9 @@ def create_sample_config(conf_file):
     """
     config = ConfigParser.RawConfigParser()
     config.add_section('Sample')
-    config.set('Sample', 'logfile', 'tunnel-sample.log')
+    config.set('Sample', 'main_logfile', 'tunnel-main-sample.log')
+    config.set('Sample', 'threads_logfile', 'tunnel-threads-sample.log')
+    config.set('Sample', 'max_threads', '100')
     config.set('Sample', 'local_port', '8080')
     config.set('Sample', 'local_ip', '127.0.0.1')
     config.set('Sample', 'local_proto', 'http')
@@ -637,6 +649,10 @@ def create_sample_config(conf_file):
     
 
 def main():
+    '''
+    Main routine, parses the config and  starts the Tunnel class.
+
+    '''
     parser = argparse.ArgumentParser(
         description='Simple and agile transparent HTTP/HTTPS Proxy')
     parser.add_argument('--local_ip', metavar='local_ip', default='0.0.0.0', 
@@ -653,6 +669,8 @@ def main():
         help='Verbose mode, dump all the requests and responses.')
     parser.add_argument('--create_config', action='store_true', 
         default=False, help='Create a sample config file')
+    parser.add_argument('--max_threads', default=100, type=int,
+        help='Max number of simultaneous threads to launch (100 by default).')
 
     args = parser.parse_args()
     
@@ -664,6 +682,7 @@ def main():
             print "Config file %s already exists." % CONFFILE
         sys.exit(0)
 
+    global DEBUG
     DEBUG = args.debug
 
     try:
@@ -674,12 +693,16 @@ def main():
                 print "Config file %s not found..." % args.config
                 sys.exit(0)
         else:
+            max_threads = args.max_threads
             local_ip = args.local_ip
             local_port = args.local_port
             remote_host = args.remote_host
             remote_port = args.remote_port
-            server = Tunnel(local_ip=local_ip, local_port=local_port,
-                        remote_host=remote_host, remote_port=remote_port)
+            server = Tunnel(max_threads=max_threads,
+                            local_ip=local_ip, 
+                            local_port=local_port,
+                            remote_host=remote_host, 
+                            remote_port=remote_port)
     except KeyboardInterrupt:
         print "Exiting."
      
