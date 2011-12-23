@@ -123,7 +123,6 @@ class ConnectionHandler:
                 +' ::::\n%s\n%d\n::::::::::'%(headers,len(data)),
                 self.logfile, 'CRIT')
         self.config.set(self.section, 'clientip', self.client.getpeername()[0])
-        print 'popopopopo', self.config.get(self.section, 'clientip')
         self.config.set(self.section, 'clientport','%s'%self.client.getpeername()[1])
         # parse the data and make the substitutions
         if data: 
